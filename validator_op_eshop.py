@@ -267,6 +267,7 @@ def kontrolovat_url(url: str) -> dict:
         "checklist": [],
         "zastarale": [],
         "souhrn": "",
+        "plainText": "",  # Store plain text for searching
     }
 
     ok, html_text, err = fetch_html(url)
@@ -277,6 +278,7 @@ def kontrolovat_url(url: str) -> dict:
 
     plain = strip_html(html_text)
     plain_lower = plain.lower()
+    result["plainText"] = plain  # Store plain text
 
     # ── checklist ──
     splneno = 0
@@ -296,6 +298,7 @@ def kontrolovat_url(url: str) -> dict:
             "typ": item["typ"],
             "nalezeno": nalezeno,
             "stav": stav,
+            "hledat": item["hledat"],  # Include keywords for search
         })
 
         if item["typ"] == "must_have":
@@ -476,6 +479,64 @@ input[type=text]:focus, input[type=url]:focus {
   border-radius: 50%; animation: spin .7s linear infinite;
 }
 @keyframes spin { to { transform: rotate(360deg); } }
+
+/* Search feature */
+#search-wrap { display: none; margin-top: 32px; }
+.search-card {
+  background: var(--card); border: 1px solid var(--border);
+  border-radius: 14px; padding: 24px; margin-bottom: 20px;
+  box-shadow: 0 4px 16px rgba(0,0,0,.06);
+}
+.search-input-group {
+  display: flex; gap: 12px; margin-bottom: 16px;
+}
+.search-input-group input {
+  flex: 1; padding: 10px 14px; border: 1px solid var(--border);
+  border-radius: 8px; font-size: 14px;
+  transition: border-color .15s;
+}
+.search-input-group input:focus {
+  outline: none; border-color: var(--primary);
+  box-shadow: 0 0 0 3px rgba(29,78,216,.15);
+}
+.search-btn {
+  display: inline-flex; align-items: center; gap: 8px;
+  padding: 10px 20px; background: var(--primary); color: white;
+  border: none; border-radius: 8px; font-size: 14px; font-weight: 700;
+  cursor: pointer; transition: background .15s;
+}
+.search-btn:hover { background: var(--primary-dark); }
+.search-btn:disabled { opacity: .5; cursor: not-allowed; }
+
+.search-results {
+  margin-top: 16px;
+}
+.search-result-item {
+  background: var(--card); border: 1px solid var(--border);
+  border-radius: 10px; padding: 14px 16px; margin-bottom: 10px;
+  font-size: 13px;
+}
+.search-result-item.found {
+  border-left: 4px solid var(--green); background: #fafafa;
+}
+.search-result-item.not-found {
+  border-left: 4px solid var(--red); background: #fafafa;
+}
+.search-result-url {
+  font-weight: 600; color: var(--primary); word-break: break-all;
+  margin-bottom: 4px; font-size: 12px;
+}
+.search-result-status {
+  display: flex; align-items: center; gap: 6px; font-size: 13px;
+}
+.search-result-status.found { color: var(--green); }
+.search-result-status.not-found { color: var(--red); }
+
+.search-summary {
+  background: #f9fafb; border: 1px solid var(--border);
+  border-radius: 10px; padding: 14px 16px; margin-bottom: 16px;
+  font-size: 13px; font-weight: 600;
+}
 </style>
 </head>
 <body>
@@ -522,10 +583,23 @@ input[type=text]:focus, input[type=url]:focus {
   </div>
 
   <div id="results"></div>
+
+  <div id="search-wrap">
+    <div class="search-card">
+      <h2>🔍 Hledat výrazy v OP</h2>
+      <p style="font-size: 12px; color: var(--gray); margin-bottom: 16px;">Zadejte výraz (např. "89/2012"), který chcete vyhledat ve všech zkontrolovaných stránkách.</p>
+      <div class="search-input-group">
+        <input type="text" id="search-input" placeholder="Zadejte výraz k vyhledání..." />
+        <button class="search-btn" onclick="performSearch()" id="search-btn">Hledat</button>
+      </div>
+      <div id="search-results-container"></div>
+    </div>
+  </div>
 </main>
 
 <script>
 let csvUrls = [];
+let validationResults = []; // Store all results for searching
 
 function switchTab(t) {
   document.querySelectorAll('.tab-btn').forEach((b,i) => b.classList.toggle('active', (i===0&&t==='url')||(i===1&&t==='csv')));
@@ -538,13 +612,88 @@ function handleFile(e) {
   if (!f) return;
   const reader = new FileReader();
   reader.onload = ev => {
-    csvUrls = ev.target.result.split('\n')
-      .map(l => l.trim().replace(/^"|"$/g,''))
-      .filter(l => l && (l.startsWith('http') || l.includes('.')));
+    const text = ev.target.result;
+    csvUrls = parseCSV(text);
     const el = document.getElementById('url-list-csv');
     el.innerHTML = csvUrls.map(u => `<span class="url-pill">${u}</span>`).join('');
   };
   reader.readAsText(f, 'UTF-8');
+}
+
+function parseCSV(text) {
+  const lines = text.split('\n');
+  const urls = [];
+  
+  // Try to detect if it's a proper CSV with headers
+  let isProperCSV = false;
+  let urlColumnIndex = -1;
+  
+  // Check first line for headers (looking for 'URL', 'http' or similar)
+  if (lines.length > 0) {
+    const firstLine = lines[0].toLowerCase();
+    if (firstLine.includes('url') || firstLine.includes('link') || firstLine.includes('op')) {
+      isProperCSV = true;
+      // Find which column contains URLs
+      const headers = parseCSVLine(lines[0]);
+      urlColumnIndex = headers.findIndex(h => 
+        h.toLowerCase().includes('url') || 
+        h.toLowerCase().includes('op') ||
+        h.toLowerCase().includes('link')
+      );
+    }
+  }
+  
+  // Process lines
+  for (let i = 1; i < lines.length; i++) {
+    const line = lines[i].trim();
+    if (!line) continue;
+    
+    if (isProperCSV && urlColumnIndex >= 0) {
+      const fields = parseCSVLine(line);
+      if (fields[urlColumnIndex]) {
+        const url = fields[urlColumnIndex].trim();
+        if (url && url.startsWith('http')) {
+          urls.push(url);
+        }
+      }
+    } else {
+      // Fallback: simple parsing for plain text or single-column format
+      const url = line.trim().replace(/^"|"$/g, '');
+      if (url && url.startsWith('http')) {
+        urls.push(url);
+      }
+    }
+  }
+  
+  return urls;
+}
+
+function parseCSVLine(line) {
+  const result = [];
+  let current = '';
+  let inQuotes = false;
+  
+  for (let i = 0; i < line.length; i++) {
+    const char = line[i];
+    const nextChar = line[i + 1];
+    
+    if (char === '"') {
+      if (inQuotes && nextChar === '"') {
+        current += '"';
+        i++;
+      } else {
+        inQuotes = !inQuotes;
+      }
+    } else if (char === ',' && !inQuotes) {
+      result.push(current);
+      current = '';
+    } else {
+      current += char;
+    }
+  }
+  
+  result.push(current);
+  return result.map(f => f.trim());
 }
 
 // Drag & drop
@@ -579,6 +728,8 @@ async function spustit() {
   document.getElementById('btn-text').textContent = 'Kontroluji…';
   document.getElementById('progress-wrap').style.display = 'block';
   document.getElementById('results').innerHTML = '';
+  document.getElementById('search-wrap').style.display = 'none';
+  validationResults = [];
 
   const results = [];
   for (let i = 0; i < urls.length; i++) {
@@ -593,10 +744,13 @@ async function spustit() {
         body: JSON.stringify({url})
       });
       const data = await resp.json();
+      validationResults.push(data);
       results.push(data);
       renderResult(data);
     } catch(e) {
-      renderResult({url, ok: false, chyba: e.message, checklist: [], zastarale: [], souhrn: '', skore: 0, max_skore: 0});
+      const errResult = {url, ok: false, chyba: e.message, checklist: [], zastarale: [], souhrn: '', skore: 0, max_skore: 0, plainText: ''};
+      validationResults.push(errResult);
+      renderResult(errResult);
     }
   }
 
@@ -605,6 +759,11 @@ async function spustit() {
   btn.disabled = false;
   document.getElementById('btn-icon').textContent = '▶';
   document.getElementById('btn-text').textContent = 'Spustit kontrolu';
+  
+  // Show search section after validation
+  document.getElementById('search-wrap').style.display = 'block';
+  document.getElementById('search-input').value = '';
+  document.getElementById('search-results-container').innerHTML = '';
 }
 
 function renderResult(data) {
@@ -675,10 +834,133 @@ function toggleBody(id) {
   document.getElementById(id).classList.toggle('open');
 }
 
+function performSearch() {
+  const searchInput = document.getElementById('search-input').value.trim();
+  if (!searchInput) {
+    alert('Zadejte výraz k vyhledání.');
+    return;
+  }
+
+  const searchLower = searchInput.toLowerCase();
+  const resultsContainer = document.getElementById('search-results-container');
+  resultsContainer.innerHTML = '';
+
+  let foundCount = 0;
+  let notFoundCount = 0;
+  const resultItems = [];
+
+  validationResults.forEach(result => {
+    let isFound = false;
+
+    if (result.ok) {
+      // Use stored plainText as primary source
+      if (result.plainText) {
+        isFound = result.plainText.toLowerCase().includes(searchLower);
+      }
+      
+      // Fallback: also check checklist items and obsolete references
+      if (!isFound && result.checklist) {
+        for (let item of result.checklist) {
+          if (item.hledat && item.hledat.some(kw => kw.toLowerCase().includes(searchLower))) {
+            isFound = true;
+            break;
+          }
+        }
+      }
+      
+      // Also check obsolete references
+      if (!isFound && result.zastarale) {
+        for (let obsolete of result.zastarale) {
+          if (obsolete.text.toLowerCase().includes(searchLower)) {
+            isFound = true;
+            break;
+          }
+        }
+      }
+    }
+
+    if (isFound) {
+      foundCount++;
+      resultItems.push({
+        url: result.url,
+        found: true
+      });
+    } else {
+      notFoundCount++;
+      resultItems.push({
+        url: result.url,
+        found: false
+      });
+    }
+  });
+
+  // Render summary
+  const summary = document.createElement('div');
+  summary.className = 'search-summary';
+  summary.innerHTML = `
+    Výraz <strong>"${escapeHtml(searchInput)}"</strong> byl nalezen v <strong>${foundCount}</strong> URL.
+    ${notFoundCount > 0 ? `Nenalezen v <strong>${notFoundCount}</strong> URL.` : ''}
+  `;
+  resultsContainer.appendChild(summary);
+
+  // Render found results
+  if (foundCount > 0) {
+    const foundTitle = document.createElement('div');
+    foundTitle.className = 'section-title';
+    foundTitle.style.marginBottom = '8px';
+    foundTitle.innerHTML = '✅ Nalezeno v:';
+    resultsContainer.appendChild(foundTitle);
+
+    resultItems.filter(r => r.found).forEach(item => {
+      const div = document.createElement('div');
+      div.className = 'search-result-item found';
+      div.innerHTML = `
+        <div class="search-result-url">${escapeHtml(item.url)}</div>
+        <div class="search-result-status found">✓ Nalezeno</div>
+      `;
+      resultsContainer.appendChild(div);
+    });
+  }
+
+  // Render not found results
+  if (notFoundCount > 0) {
+    const notFoundTitle = document.createElement('div');
+    notFoundTitle.className = 'section-title';
+    notFoundTitle.style.marginBottom = '8px';
+    notFoundTitle.style.marginTop = '16px';
+    notFoundTitle.innerHTML = '❌ Nenalezeno v:';
+    resultsContainer.appendChild(notFoundTitle);
+
+    resultItems.filter(r => !r.found).forEach(item => {
+      const div = document.createElement('div');
+      div.className = 'search-result-item not-found';
+      div.innerHTML = `
+        <div class="search-result-url">${escapeHtml(item.url)}</div>
+        <div class="search-result-status not-found">✗ Nenalezeno</div>
+      `;
+      resultsContainer.appendChild(div);
+    });
+  }
+}
+
+function escapeHtml(text) {
+  const map = {
+    '&': '&amp;',
+    '<': '&lt;',
+    '>': '&gt;',
+    '"': '&quot;',
+    "'": '&#039;'
+  };
+  return text.replace(/[&<>"']/g, m => map[m]);
+}
+
 // Enter pro ruční URL
 document.addEventListener('DOMContentLoaded', () => {
   document.getElementById('manual-url').addEventListener('keydown', e => {
     if (e.key === 'Enter') spustit();
+  });
+  document.getElementById('search-input').addEventListener('keydown', e => {
+    if (e.key === 'Enter') performSearch();
   });
 });
 </script>
