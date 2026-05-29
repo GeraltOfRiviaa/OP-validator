@@ -1,4 +1,10 @@
-.venv
+.venv/
+__pycache__/
+*.pyc
+
+# Runtime output
 report_status.json
+
+# Build artifacts
 build/
-valodator_op_eshop.spec
+dist/
